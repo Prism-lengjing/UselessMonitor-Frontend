@@ -1,4 +1,4 @@
 {
-  "apiBase": "http://localhost:8080",
-  "readKey": "READ_KEY_EXAMPLE"
+  "apiBase": "https://m-api.amethyst.ltd",
+  "readKey": "123456"
 }
