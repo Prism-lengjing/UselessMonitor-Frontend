@@ -1,0 +1,4 @@
+{
+  "apiBase": "https://api.your-monitor-service.com",
+  "readKey": "YOUR_READ_ACCESS_KEY_HERE"
+}
