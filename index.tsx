@@ -1,10 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 // --- Types & Data ---
 
 type Status = 'OPERATIONAL' | 'DEGRADED' | 'OFFLINE' | 'MAINTENANCE';
 type Lang = 'en' | 'zh';
+
+interface RemoteConfig {
+  apiBaseUrl: string;
+  readKey: string;
+}
+
+interface ApiMonitor {
+  id: string | number;
+  name: string;
+  type?: string;
+  status?: string;
+  last_check?: string;
+  latency?: number;
+  uptime?: number;
+  region?: string;
+}
 
 interface Service {
   id: string;
@@ -81,18 +97,6 @@ const DICTIONARY = {
   }
 };
 
-const EVENT_TEMPLATES = [
-  { en: "Packets dropped in sector 7", zh: "第7扇区丢包", type: "WARN" },
-  { en: "Handshake verified: node_alpha", zh: "握手验证通过: node_alpha", type: "INFO" },
-  { en: "Coolant levels stable", zh: "冷却液液位稳定", type: "INFO" },
-  { en: "Re-routing traffic via subnet B", zh: "流量重路由至子网 B", type: "INFO" },
-  { en: "Ping spike detected in EU-CENTRAL", zh: "检测到 EU-CENTRAL 延迟激增", type: "WARN" },
-  { en: "Encryption keys rotated", zh: "加密密钥已轮换", type: "INFO" },
-  { en: "Cache flush initiated", zh: "缓存刷新已启动", type: "INFO" },
-  { en: "CRITICAL: Packet loss > 5%", zh: "严重警告: 丢包率 > 5%", type: "CRIT" }
-] as const;
-
-
 // --- Helper Components ---
 
 const HexColor = {
@@ -102,6 +106,26 @@ const HexColor = {
   purple: '#bd00ff',
   dark: '#0a0a12',
   dim: 'rgba(0, 243, 255, 0.1)',
+};
+
+const normalizeStatus = (status?: string): Status => {
+  if (!status) return 'MAINTENANCE';
+  const normalized = status.toLowerCase();
+  if (normalized.includes('degrad')) return 'DEGRADED';
+  if (normalized.includes('maint')) return 'MAINTENANCE';
+  if (normalized.includes('off') || normalized.includes('down') || normalized.includes('fail')) return 'OFFLINE';
+  return 'OPERATIONAL';
+};
+
+const mapMonitorToService = (monitor: ApiMonitor, index: number): Service => {
+  return {
+    id: String(monitor.id ?? index + 1),
+    name: monitor.name ?? `MONITOR_${index + 1}`,
+    status: normalizeStatus(monitor.status),
+    latency: monitor.latency ?? Math.floor(Math.random() * 150) + 10,
+    uptime: Number((monitor.uptime ?? (95 + Math.random() * 5)).toFixed(2)),
+    region: monitor.region ?? monitor.type ?? 'GLOBAL'
+  };
 };
 
 const getStatusColor = (status: Status) => {
@@ -515,44 +539,108 @@ const App = () => {
   ]);
   const [globalStatus, setGlobalStatus] = useState<Status>('OPERATIONAL');
   const [lang, setLang] = useState<Lang>('en');
-  
+  const [config, setConfig] = useState<RemoteConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [isConfigLoading, setIsConfigLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+
   const t = DICTIONARY[lang];
 
-  useEffect(() => {
-    // Simulate real-time updates
-    const interval = setInterval(() => {
-      setServices(prev => prev.map(svc => {
-        if (svc.status === 'OFFLINE') return svc;
-        
-        // Randomize latency
-        const fluctuation = Math.floor(Math.random() * 20) - 10;
-        let newLatency = Math.max(0, svc.latency + fluctuation);
-        
-        // Random glitch spike
-        if (Math.random() > 0.95) newLatency += 100;
+  const addLog = useCallback((message: { en: string; zh: string }, type: 'INFO' | 'WARN' | 'CRIT' = 'INFO') => {
+    setLogs(prev => [...prev.slice(-19), {
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      message,
+      type
+    }]);
+  }, []);
 
-        // Occasional status flip simulation (rare)
-        if (svc.id === '3' && Math.random() > 0.98) {
-           // Toggle degraded
+  useEffect(() => {
+    let isActive = true;
+    const loadConfig = async () => {
+      try {
+        const response = await fetch(`${import.meta.env.BASE_URL}config.json`, { cache: 'no-cache' });
+        if (!response.ok) throw new Error(`Unable to load config.json (HTTP ${response.status})`);
+        const data = await response.json();
+        if (!data.apiBaseUrl || !data.readKey) {
+          throw new Error('config.json must include "apiBaseUrl" and "readKey"');
+        }
+        if (!isActive) return;
+        setConfig({
+          apiBaseUrl: String(data.apiBaseUrl).replace(/\/$/, ''),
+          readKey: String(data.readKey)
+        });
+        setConfigError(null);
+      } catch (err) {
+        if (!isActive) return;
+        setConfigError((err as Error).message);
+      } finally {
+        if (isActive) setIsConfigLoading(false);
+      }
+    };
+
+    loadConfig();
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!config) return;
+    let isActive = true;
+    const headers = { Authorization: config.readKey };
+
+    const requestData = async () => {
+      try {
+        setIsFetching(true);
+        const monitorResponse = await fetch(`${config.apiBaseUrl}/monitor`, { headers });
+        if (!monitorResponse.ok) {
+          throw new Error(`GET /monitor failed (${monitorResponse.status})`);
+        }
+        const monitorData: ApiMonitor[] = await monitorResponse.json();
+        if (!isActive) return;
+        if (Array.isArray(monitorData)) {
+          setServices(monitorData.map((monitor, index) => mapMonitorToService(monitor, index)));
+          addLog({
+            en: `Fetched ${monitorData.length} monitors from API`,
+            zh: `已从 API 获取 ${monitorData.length} 个监控项`
+          }, 'INFO');
+        } else {
+          throw new Error('Monitor payload must be an array');
         }
 
-        return { ...svc, latency: newLatency };
-      }));
-
-      // Occasionally add a log
-      if (Math.random() > 0.85) {
-        const evt = EVENT_TEMPLATES[Math.floor(Math.random() * EVENT_TEMPLATES.length)];
-        setLogs(prev => [...prev.slice(-19), {
-          timestamp: new Date().toLocaleTimeString([], { hour12: false }),
-          message: { en: evt.en, zh: evt.zh },
-          type: evt.type as 'INFO' | 'WARN' | 'CRIT'
-        }]);
+        const statusResponse = await fetch(`${config.apiBaseUrl}/status`, { headers });
+        if (statusResponse.ok) {
+          const statusPayload = await statusResponse.json();
+          if (statusPayload?.status) {
+            setGlobalStatus(normalizeStatus(statusPayload.status));
+          }
+        }
+      } catch (error) {
+        if (!isActive) return;
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        addLog({ en: `API request failed: ${message}`, zh: `API 请求失败: ${message}` }, 'WARN');
+      } finally {
+        if (isActive) setIsFetching(false);
       }
+    };
 
-    }, 1500);
+    requestData();
+    const interval = setInterval(requestData, 15000);
+    return () => {
+      isActive = false;
+      clearInterval(interval);
+    };
+  }, [config, addLog]);
 
-    return () => clearInterval(interval);
-  }, []);
+  useEffect(() => {
+    if (!config) return;
+    if (config.readKey === 'CHANGE_ME_READ_KEY') {
+      addLog({
+        en: 'config.json still uses the placeholder read key. Update it to connect to your backend.',
+        zh: 'config.json 仍在使用示例读密钥，请更新为实际后端凭证。'
+      }, 'WARN');
+    }
+  }, [config, addLog]);
 
   useEffect(() => {
     const offline = services.some(s => s.status === 'OFFLINE');
@@ -592,7 +680,7 @@ const App = () => {
 
           <div style={{ display: 'flex', gap: '2rem', alignItems: 'center' }}>
             {/* Language Switcher - Sharp Design */}
-            <button 
+            <button
               onClick={() => setLang(l => l === 'en' ? 'zh' : 'en')}
               style={{
                 background: 'transparent',
@@ -621,14 +709,52 @@ const App = () => {
               [ {lang === 'en' ? 'EN' : '中文'} ]
             </button>
 
+            {config && (
+              <span style={{
+                fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
+                fontSize: '0.8rem',
+                color: isFetching ? HexColor.yellow : HexColor.cyan,
+                border: `1px solid ${isFetching ? HexColor.yellow : HexColor.cyan}`,
+                padding: '0.25rem 0.75rem',
+                letterSpacing: '2px',
+                textTransform: 'uppercase'
+              }}>
+                {isFetching ? 'SYNCING API' : 'API LINKED'}
+              </span>
+            )}
+
             <GlobalStatusIndicator status={globalStatus} lang={lang} />
           </div>
         </header>
 
+        {isConfigLoading && (
+          <div style={{
+            border: `1px solid ${HexColor.yellow}`,
+            color: HexColor.yellow,
+            padding: '0.75rem 1rem',
+            fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
+            marginBottom: '1.5rem'
+          }}>
+            Loading config.json ... / 正在加载 config.json ...
+          </div>
+        )}
+
+        {configError && (
+          <div style={{
+            border: `1px solid ${HexColor.red}`,
+            color: HexColor.red,
+            padding: '0.75rem 1rem',
+            fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
+            marginBottom: '1.5rem'
+          }}>
+            Config error: {configError}. Ensure public/config.json is present with your API base URL and readKey.
+          </div>
+        )}
+
         {/* GRID */}
-        <div style={{ 
-          display: 'grid', 
-          gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', 
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))',
           gap: '2rem',
           flex: 1
         }}>
