@@ -31,4 +31,24 @@ npm run build
 Outputs an optimized bundle to `dist/`.
 
 ## Configuration
-The interface currently relies on mocked telemetry and does not require external services. If you later connect it to real APIs, create a `.env.local` file and load any needed keys via Vite's `import.meta.env` mechanism.
+Create `public/config.json` to let the dashboard know how to reach the backend API. A starter file is provided at `public/config.example.json`:
+
+```json
+{
+  "apiBaseUrl": "http://localhost:8080",
+  "readKey": "CHANGE_ME_READ_KEY"
+}
+```
+
+- `apiBaseUrl`: The base URL of the UselessMonitor backend (for example `https://monitor.example.com`).
+- `readKey`: The `READ_KEY` value configured on the backend; it will be sent as the `Authorization` header for every request.
+
+Copy the example file, update the values, and restart Vite:
+
+```bash
+cp public/config.example.json public/config.json
+# edit public/config.json and insert your keys
+npm run dev
+```
+
+The frontend will automatically fetch `/monitor` and `/status` from the configured backend at runtime.
