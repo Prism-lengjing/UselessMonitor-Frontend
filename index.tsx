@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 // --- Types & Data ---
@@ -6,35 +6,24 @@ import { createRoot } from 'react-dom/client';
 type Status = 'OPERATIONAL' | 'DEGRADED' | 'OFFLINE' | 'MAINTENANCE';
 type Lang = 'en' | 'zh';
 
-interface RemoteConfig {
-  apiBaseUrl: string;
-  readKey: string;
-}
-
-interface ApiMonitor {
-  id: string | number;
-  name: string;
-  type?: string;
-  status?: string;
-  last_check?: string;
-  latency?: number;
-  uptime?: number;
-  region?: string;
-}
-
 interface Service {
   id: string;
   name: string;
   status: Status;
   latency: number;
   uptime: number;
-  region: string;
+  region: string; // Maps to API 'type'
 }
 
 interface LogEntry {
   timestamp: string;
   message: { en: string; zh: string };
   type: 'INFO' | 'WARN' | 'CRIT';
+}
+
+interface AppConfig {
+  apiBase: string;
+  readKey: string;
 }
 
 const INITIAL_SERVICES: Service[] = [
@@ -65,6 +54,18 @@ const DICTIONARY = {
     node: 'NODE',
     coords: 'COORDS',
     time: 'SERVER_TIME',
+    admin: 'ADMIN ACCESS',
+    login: 'AUTHENTICATE',
+    logout: 'TERMINATE SESSION',
+    keyPlaceholder: 'ENTER SECURITY KEY',
+    deploy: 'DEPLOY NODE',
+    edit: 'RECONFIGURE',
+    delete: 'DECOMMISSION',
+    save: 'COMMIT',
+    cancel: 'ABORT',
+    name: 'NODE_ID',
+    type: 'SECTOR/REGION',
+    statusLabel: 'CURRENT_STATUS',
     status: {
       OPERATIONAL: 'OPERATIONAL',
       DEGRADED: 'DEGRADED',
@@ -88,6 +89,18 @@ const DICTIONARY = {
     node: '节点',
     coords: '坐标',
     time: '服务器时间',
+    admin: '管理员访问',
+    login: '认证',
+    logout: '终止会话',
+    keyPlaceholder: '输入安全密钥',
+    deploy: '部署节点',
+    edit: '重新配置',
+    delete: '退役',
+    save: '提交',
+    cancel: '中止',
+    name: '节点标识',
+    type: '扇区/区域',
+    statusLabel: '当前状态',
     status: {
       OPERATIONAL: '运行正常',
       DEGRADED: '性能降级',
@@ -96,6 +109,18 @@ const DICTIONARY = {
     }
   }
 };
+
+const EVENT_TEMPLATES = [
+  { en: "Packets dropped in sector 7", zh: "第7扇区丢包", type: "WARN" },
+  { en: "Handshake verified: node_alpha", zh: "握手验证通过: node_alpha", type: "INFO" },
+  { en: "Coolant levels stable", zh: "冷却液液位稳定", type: "INFO" },
+  { en: "Re-routing traffic via subnet B", zh: "流量重路由至子网 B", type: "INFO" },
+  { en: "Ping spike detected in EU-CENTRAL", zh: "检测到 EU-CENTRAL 延迟激增", type: "WARN" },
+  { en: "Encryption keys rotated", zh: "加密密钥已轮换", type: "INFO" },
+  { en: "Cache flush initiated", zh: "缓存刷新已启动", type: "INFO" },
+  { en: "CRITICAL: Packet loss > 5%", zh: "严重警告: 丢包率 > 5%", type: "CRIT" }
+] as const;
+
 
 // --- Helper Components ---
 
@@ -108,26 +133,6 @@ const HexColor = {
   dim: 'rgba(0, 243, 255, 0.1)',
 };
 
-const normalizeStatus = (status?: string): Status => {
-  if (!status) return 'MAINTENANCE';
-  const normalized = status.toLowerCase();
-  if (normalized.includes('degrad')) return 'DEGRADED';
-  if (normalized.includes('maint')) return 'MAINTENANCE';
-  if (normalized.includes('off') || normalized.includes('down') || normalized.includes('fail')) return 'OFFLINE';
-  return 'OPERATIONAL';
-};
-
-const mapMonitorToService = (monitor: ApiMonitor, index: number): Service => {
-  return {
-    id: String(monitor.id ?? index + 1),
-    name: monitor.name ?? `MONITOR_${index + 1}`,
-    status: normalizeStatus(monitor.status),
-    latency: monitor.latency ?? Math.floor(Math.random() * 150) + 10,
-    uptime: Number((monitor.uptime ?? (95 + Math.random() * 5)).toFixed(2)),
-    region: monitor.region ?? monitor.type ?? 'GLOBAL'
-  };
-};
-
 const getStatusColor = (status: Status) => {
   switch (status) {
     case 'OPERATIONAL': return HexColor.cyan;
@@ -138,7 +143,112 @@ const getStatusColor = (status: Status) => {
   }
 };
 
-// --- Background Component (Starry Quicksand) ---
+const mapApiStatusToAppStatus = (apiStatus: string): Status => {
+  const s = apiStatus?.toUpperCase();
+  if (s === 'HEALTHY' || s === 'OK' || s === 'OPERATIONAL') return 'OPERATIONAL';
+  if (s === 'DEGRADED') return 'DEGRADED';
+  if (s === 'UNHEALTHY' || s === 'DOWN' || s === 'OFFLINE') return 'OFFLINE';
+  if (s === 'MAINTENANCE') return 'MAINTENANCE';
+  return 'DEGRADED'; // Default fallback
+};
+
+// --- Shared UI Components ---
+
+const SciFiButton = ({ onClick, children, variant = 'cyan', style = {} }: any) => {
+  const color = variant === 'red' ? HexColor.red : HexColor.cyan;
+  return (
+    <button 
+      onClick={onClick}
+      style={{
+        background: 'transparent',
+        border: `1px solid ${color}`,
+        color: color,
+        padding: '0.5rem 1.5rem',
+        fontFamily: '"Share Tech Mono", monospace',
+        fontSize: '0.9rem',
+        cursor: 'pointer',
+        clipPath: 'polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px)',
+        textTransform: 'uppercase',
+        letterSpacing: '1px',
+        transition: 'all 0.2s',
+        ...style
+      }}
+      onMouseEnter={(e) => {
+         e.currentTarget.style.background = `${color}20`;
+         e.currentTarget.style.boxShadow = `0 0 15px ${color}40`;
+      }}
+      onMouseLeave={(e) => {
+         e.currentTarget.style.background = 'transparent';
+         e.currentTarget.style.boxShadow = 'none';
+      }}
+    >
+      {children}
+    </button>
+  );
+};
+
+const SciFiInput = ({ value, onChange, placeholder, label }: any) => (
+  <div style={{ marginBottom: '1.5rem' }}>
+    <label style={{ display: 'block', color: '#888', fontSize: '0.8rem', marginBottom: '0.5rem' }}>
+      // {label}
+    </label>
+    <input 
+      type="text" 
+      value={value} 
+      onChange={onChange}
+      placeholder={placeholder}
+      style={{
+        width: '100%',
+        background: 'rgba(255,255,255,0.05)',
+        border: 'none',
+        borderBottom: `1px solid ${HexColor.cyan}`,
+        color: '#fff',
+        padding: '0.8rem',
+        fontFamily: '"Share Tech Mono", monospace',
+        fontSize: '1rem',
+        outline: 'none'
+      }}
+    />
+  </div>
+);
+
+const Modal = ({ isOpen, onClose, title, children }: any) => {
+  if (!isOpen) return null;
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(5px)',
+      zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center'
+    }}>
+      <div style={{
+        background: '#0a0a12',
+        border: `1px solid ${HexColor.cyan}`,
+        width: '90%', maxWidth: '500px',
+        padding: '2rem',
+        clipPath: 'polygon(20px 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%, 0 100%, 0 20px)',
+        boxShadow: `0 0 30px rgba(0, 243, 255, 0.1)`,
+        position: 'relative'
+      }}>
+        <h2 style={{ marginTop: 0, color: HexColor.cyan, fontFamily: '"Rajdhani", sans-serif', textTransform: 'uppercase', letterSpacing: '2px' }}>
+          {title}
+        </h2>
+        <div style={{ height: '1px', background: `linear-gradient(90deg, ${HexColor.cyan}, transparent)`, marginBottom: '2rem' }} />
+        {children}
+        <button 
+          onClick={onClose}
+          style={{
+            position: 'absolute', top: '1rem', right: '1rem',
+            background: 'none', border: 'none', color: '#666', fontSize: '1.5rem', cursor: 'pointer'
+          }}
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// --- Background Component ---
 
 const StarryQuicksand = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -170,16 +280,11 @@ const StarryQuicksand = () => {
       constructor() {
         this.x = Math.random() * width;
         this.y = Math.random() * height;
-        // Flow diagonally down-left
         this.speedY = 0.2 + Math.random() * 0.8;
         this.speedX = -0.1 - Math.random() * 0.3;
-        
-        // Rectangular "sand" grains
         this.size = 0.5 + Math.random() * 1.5; 
         this.opacity = Math.random() * 0.8;
         this.fadeSpeed = 0.002 + Math.random() * 0.005;
-        
-        // Occasional colored grains
         const rand = Math.random();
         if (rand > 0.98) this.color = HexColor.cyan;
         else if (rand > 0.96) this.color = HexColor.purple;
@@ -189,73 +294,47 @@ const StarryQuicksand = () => {
       update() {
         this.y += this.speedY;
         this.x += this.speedX;
-
-        // Twinkle
         this.opacity += this.fadeSpeed;
-        if (this.opacity > 0.8 || this.opacity < 0.1) {
-          this.fadeSpeed = -this.fadeSpeed;
-        }
-
-        // Reset if out of bounds
+        if (this.opacity > 0.8 || this.opacity < 0.1) this.fadeSpeed = -this.fadeSpeed;
         if (this.y > height || this.x < 0) {
           this.y = -10;
-          this.x = Math.random() * width + 100; // Offset to fill corner
+          this.x = Math.random() * width + 100;
         }
       }
 
       draw(ctx: CanvasRenderingContext2D) {
         ctx.fillStyle = this.color === '#ffffff' 
           ? `rgba(255, 255, 255, ${this.opacity})` 
-          : this.color; // Keep colored ones bright
-        
+          : this.color;
         ctx.globalAlpha = this.color === '#ffffff' ? 1 : 0.6;
-        
-        // Sharp squares/rectangles
-        const length = this.size * (1 + Math.random()); // Slight stretch effect for motion
+        const length = this.size * (1 + Math.random());
         ctx.fillRect(this.x, this.y, length, this.size);
         ctx.globalAlpha = 1.0;
       }
     }
 
-    // Initialize
-    for (let i = 0; i < particleCount; i++) {
-      particles.push(new Particle());
-    }
+    for (let i = 0; i < particleCount; i++) particles.push(new Particle());
 
     const animate = () => {
-      ctx.fillStyle = '#050508'; // Clear with solid color to avoid trails
+      ctx.fillStyle = '#050508';
       ctx.fillRect(0, 0, width, height);
-      
-      // Draw a subtle grid in background
       ctx.strokeStyle = 'rgba(0, 243, 255, 0.03)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (let x = 0; x < width; x += 100) {
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-      }
-      for (let y = 0; y < height; y += 100) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-      }
+      for (let x = 0; x < width; x += 100) { ctx.moveTo(x, 0); ctx.lineTo(x, height); }
+      for (let y = 0; y < height; y += 100) { ctx.moveTo(0, y); ctx.lineTo(width, y); }
       ctx.stroke();
-
-      particles.forEach(p => {
-        p.update();
-        p.draw(ctx);
-      });
+      particles.forEach(p => { p.update(); p.draw(ctx); });
       requestAnimationFrame(animate);
     };
 
     const animationId = requestAnimationFrame(animate);
-
     const handleResize = () => {
       width = window.innerWidth;
       height = window.innerHeight;
       canvas.width = width;
       canvas.height = height;
     };
-
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
@@ -263,54 +342,30 @@ const StarryQuicksand = () => {
     };
   }, []);
 
-  return (
-    <canvas 
-      ref={canvasRef} 
-      style={{ 
-        position: 'fixed', 
-        top: 0, 
-        left: 0, 
-        zIndex: -1,
-        pointerEvents: 'none'
-      }} 
-    />
-  );
+  return <canvas ref={canvasRef} style={{ position: 'fixed', top: 0, left: 0, zIndex: -1, pointerEvents: 'none' }} />;
 };
 
 // --- UI Components ---
 
 const GlitchText = ({ text, subtext }: { text: string, subtext: string }) => {
   return (
-    <div style={{ position: 'relative', display: 'inline-block', marginBottom: '2rem' }}>
+    <div style={{ position: 'relative', display: 'inline-block' }}>
       <h1 className="glitch-title" style={{ 
-        margin: 0, 
-        fontSize: '3.5rem', 
-        fontWeight: 700, 
-        color: '#fff',
-        letterSpacing: '6px',
-        textTransform: 'uppercase',
-        position: 'relative',
-        fontFamily: '"Rajdhani", "Noto Sans SC", sans-serif',
+        margin: 0, fontWeight: 700, color: '#fff', letterSpacing: '6px', textTransform: 'uppercase',
+        position: 'relative', fontFamily: '"Rajdhani", "Noto Sans SC", sans-serif',
       }}>
         {text}
       </h1>
-      <div style={{ 
-        color: HexColor.cyan, 
-        letterSpacing: '4px', 
-        fontSize: '1rem', 
-        marginTop: '5px',
+      <div className="glitch-subtitle" style={{ 
+        color: HexColor.cyan, letterSpacing: '4px', marginTop: '5px',
         fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
         background: 'linear-gradient(90deg, transparent, rgba(0,243,255,0.1), transparent)',
         padding: '2px 10px'
       }}>
         // {subtext}
       </div>
-      
       <style>{`
-        .glitch-title {
-          text-shadow: 2px 0 ${HexColor.red}, -2px 0 ${HexColor.cyan};
-          animation: glitch 3s infinite linear alternate-reverse;
-        }
+        .glitch-title { text-shadow: 2px 0 ${HexColor.red}, -2px 0 ${HexColor.cyan}; animation: glitch 3s infinite linear alternate-reverse; }
         @keyframes glitch {
           0% { text-shadow: 2px 0 ${HexColor.red}, -2px 0 ${HexColor.cyan}; transform: skewX(0deg); }
           90% { text-shadow: 2px 0 ${HexColor.red}, -2px 0 ${HexColor.cyan}; transform: skewX(0deg); }
@@ -324,41 +379,51 @@ const GlitchText = ({ text, subtext }: { text: string, subtext: string }) => {
   );
 };
 
-const Card: React.FC<{ service: Service; lang: Lang }> = ({ service, lang }) => {
+const Card: React.FC<{ 
+  service: Service; 
+  lang: Lang; 
+  isAdmin: boolean;
+  onEdit: (s: Service) => void;
+  onDelete: (id: string) => void;
+}> = ({ service, lang, isAdmin, onEdit, onDelete }) => {
   const color = getStatusColor(service.status);
   const t = DICTIONARY[lang];
-  
-  // Clip-path for cut corner (bottom-right and top-left for tech feel)
   const clipPath = "polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px)";
   
   return (
     <div 
       className="service-card"
       style={{
-        position: 'relative',
-        clipPath: clipPath,
-        background: 'rgba(10, 12, 16, 0.85)',
-        borderLeft: `4px solid ${color}`,
-        padding: '1.5rem',
-        color: '#fff',
+        position: 'relative', clipPath: clipPath, background: 'rgba(10, 12, 16, 0.85)',
+        borderLeft: `4px solid ${color}`, padding: '1.5rem', color: '#fff',
         transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
         fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '1rem',
+        display: 'flex', flexDirection: 'column', gap: '1rem',
         boxShadow: '0 0 0 1px rgba(255,255,255,0.05)'
       }}
     >
-      {/* Decorative Grid Background inside card */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
         backgroundImage: 'linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)',
-        backgroundSize: '20px 20px',
-        pointerEvents: 'none',
-        zIndex: 0
+        backgroundSize: '20px 20px', pointerEvents: 'none', zIndex: 0
       }} />
 
-      {/* Header */}
+      {/* Admin Controls */}
+      {isAdmin && (
+        <div style={{ position: 'absolute', top: 0, right: 0, zIndex: 10, display: 'flex' }}>
+          <button 
+            onClick={() => onEdit(service)}
+            style={{ background: HexColor.cyan, color: '#000', border: 'none', padding: '2px 8px', fontSize: '0.7rem', cursor: 'pointer', fontWeight: 'bold' }}>
+            EDIT
+          </button>
+          <button 
+            onClick={() => onDelete(service.id)}
+            style={{ background: HexColor.red, color: '#000', border: 'none', padding: '2px 8px', fontSize: '0.7rem', cursor: 'pointer', fontWeight: 'bold' }}>
+            X
+          </button>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', position: 'relative', zIndex: 1 }}>
         <div>
           <h3 style={{ margin: 0, fontSize: '1.2rem', letterSpacing: '1px', textTransform: 'uppercase', color: '#fff' }}>
@@ -367,11 +432,8 @@ const Card: React.FC<{ service: Service; lang: Lang }> = ({ service, lang }) => 
           <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '4px' }}>{t.id}: {service.id.padStart(4, '0')}</div>
         </div>
         <div style={{ 
-          background: color, 
-          color: '#000', 
-          padding: '4px 8px', 
-          fontSize: '0.75rem', 
-          fontWeight: 'bold',
+          background: color, color: '#000', padding: '4px 8px', 
+          fontSize: '0.75rem', fontWeight: 'bold',
           clipPath: 'polygon(10px 0, 100% 0, 100% 100%, 0% 100%)',
           textTransform: 'uppercase'
         }}>
@@ -379,17 +441,13 @@ const Card: React.FC<{ service: Service; lang: Lang }> = ({ service, lang }) => 
         </div>
       </div>
 
-      {/* Metrics Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', position: 'relative', zIndex: 1 }}>
-        {/* Latency */}
         <div style={{ background: 'rgba(0,0,0,0.3)', padding: '0.5rem' }}>
           <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#888', marginBottom: '2px' }}>{t.latency}</div>
           <div style={{ color: service.latency > 100 ? HexColor.yellow : HexColor.cyan, fontSize: '1.2rem' }}>
             {service.status === 'OFFLINE' ? '---' : <>{service.latency}<span style={{ fontSize: '0.8rem', opacity: 0.7 }}>ms</span></>}
           </div>
         </div>
-        
-        {/* Uptime */}
         <div style={{ background: 'rgba(0,0,0,0.3)', padding: '0.5rem' }}>
           <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#888', marginBottom: '2px' }}>{t.uptime}</div>
           <div style={{ color: '#fff', fontSize: '1.2rem' }}>
@@ -398,43 +456,46 @@ const Card: React.FC<{ service: Service; lang: Lang }> = ({ service, lang }) => 
         </div>
       </div>
 
-      {/* Footer Info & Graph */}
       <div style={{ position: 'relative', zIndex: 1 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#666', marginBottom: '6px' }}>
           <span>{t.region}: {service.region}</span>
           <span>{t.load}</span>
         </div>
-        
-        {/* Sharp Load Bar */}
         <div style={{ width: '100%', height: '4px', background: '#222', position: 'relative' }}>
           <div style={{ 
              width: service.status === 'OFFLINE' ? '0%' : `${Math.random() * 40 + 30}%`, 
-             height: '100%', 
-             background: color,
-             boxShadow: `0 0 10px ${color}80` 
+             height: '100%', background: color, boxShadow: `0 0 10px ${color}80` 
           }}></div>
         </div>
       </div>
 
-      {/* Hover Overlay */}
       <div className="hover-effect" style={{
         position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
         background: `linear-gradient(135deg, transparent 0%, ${color}10 100%)`,
-        border: `1px solid ${color}`,
-        opacity: 0,
-        pointerEvents: 'none',
-        transition: 'opacity 0.2s',
-        zIndex: 2
+        border: `1px solid ${color}`, opacity: 0, pointerEvents: 'none',
+        transition: 'opacity 0.2s', zIndex: 2
       }}></div>
-      
-      <style>{`
-        .service-card:hover {
-          transform: translateY(-4px);
-        }
-        .service-card:hover .hover-effect {
-          opacity: 1;
-        }
-      `}</style>
+      <style>{` .service-card:hover { transform: translateY(-4px); } .service-card:hover .hover-effect { opacity: 1; } `}</style>
+    </div>
+  );
+};
+
+const AddServiceCard = ({ onClick, lang }: any) => {
+  const t = DICTIONARY[lang];
+  return (
+    <div 
+      onClick={onClick}
+      style={{
+        height: '100%', minHeight: '220px',
+        border: `2px dashed ${HexColor.cyan}`,
+        background: 'rgba(0, 243, 255, 0.05)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer', color: HexColor.cyan,
+        clipPath: "polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px)",
+      }}
+    >
+      <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>+</div>
+      <div style={{ fontFamily: '"Share Tech Mono", monospace', letterSpacing: '1px' }}>{t.deploy}</div>
     </div>
   );
 };
@@ -442,34 +503,19 @@ const Card: React.FC<{ service: Service; lang: Lang }> = ({ service, lang }) => 
 const Terminal = ({ logs, lang }: { logs: LogEntry[]; lang: Lang }) => {
   const endRef = useRef<HTMLDivElement>(null);
   const t = DICTIONARY[lang];
-  
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
   return (
     <div style={{
-      marginTop: '3rem',
-      border: '1px solid #333',
-      background: 'rgba(5, 5, 8, 0.95)',
-      padding: '0',
-      fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-      height: '250px',
-      display: 'flex',
-      flexDirection: 'column',
-      clipPath: 'polygon(0 0, 100% 0, 100% 100%, 30px 100%, 0 calc(100% - 30px))', // Cut bottom-left corner
+      marginTop: '3rem', border: '1px solid #333', background: 'rgba(5, 5, 8, 0.95)',
+      padding: '0', fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
+      height: '250px', display: 'flex', flexDirection: 'column',
+      clipPath: 'polygon(0 0, 100% 0, 100% 100%, 30px 100%, 0 calc(100% - 30px))',
       position: 'relative'
     }}>
-      {/* Terminal Header */}
       <div style={{ 
-        background: '#1a1a20', 
-        padding: '0.5rem 1rem', 
-        borderBottom: '1px solid #333',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        fontSize: '0.8rem',
-        color: '#888'
+        background: '#1a1a20', padding: '0.5rem 1rem', borderBottom: '1px solid #333',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', color: '#888'
       }}>
         <span>// {t.events}</span>
         <div style={{ display: 'flex', gap: '10px' }}>
@@ -477,24 +523,17 @@ const Terminal = ({ logs, lang }: { logs: LogEntry[]; lang: Lang }) => {
            <span style={{ color: HexColor.cyan }}>{t.live}</span>
         </div>
       </div>
-
-      {/* Logs Area */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', fontSize: '0.85rem' }}>
         {logs.map((log, i) => {
            const isCritical = log.type === 'CRIT';
            const isWarn = log.type === 'WARN';
-           
            return (
             <div key={i} style={{ marginBottom: '6px', display: 'flex', opacity: 0.9 }}>
-              <span style={{ color: '#444', marginRight: '15px', minWidth: '80px' }}>
-                [{log.timestamp}]
-              </span>
+              <span style={{ color: '#444', marginRight: '15px', minWidth: '80px' }}>[{log.timestamp}]</span>
               <span style={{ 
                 color: isCritical ? HexColor.red : isWarn ? HexColor.yellow : HexColor.cyan,
                 textShadow: isCritical ? `0 0 5px ${HexColor.red}` : 'none'
-              }}>
-                {`> ${log.message[lang]}`}
-              </span>
+              }}>{`> ${log.message[lang]}`}</span>
             </div>
           );
         })}
@@ -508,23 +547,12 @@ const GlobalStatusIndicator = ({ status, lang }: { status: Status; lang: Lang })
   const color = getStatusColor(status);
   const t = DICTIONARY[lang];
   return (
-    <div style={{ 
-      textAlign: 'right', 
-      borderRight: `4px solid ${color}`, 
-      paddingRight: '1.5rem',
-      height: '100%'
-    }}>
+    <div style={{ textAlign: 'right', borderRight: `4px solid ${color}`, paddingRight: '1.5rem', height: '100%' }}>
       <div style={{ fontSize: '0.8rem', color: '#666', letterSpacing: '2px' }}>{t.integrity}</div>
-      <div style={{ 
-        fontSize: '2.5rem', 
-        fontWeight: 'bold', 
-        color: color,
-        textShadow: `0 0 20px ${color}60`,
-        fontFamily: '"Rajdhani", "Noto Sans SC", sans-serif',
-        lineHeight: 1
-      }}>
-        {t.status[status]}
-      </div>
+      <div className="status-value" style={{ 
+        fontWeight: 'bold', color: color, textShadow: `0 0 20px ${color}60`,
+        fontFamily: '"Rajdhani", "Noto Sans SC", sans-serif', lineHeight: 1
+      }}>{t.status[status]}</div>
     </div>
   );
 };
@@ -535,112 +563,96 @@ const App = () => {
   const [services, setServices] = useState<Service[]>(INITIAL_SERVICES);
   const [logs, setLogs] = useState<LogEntry[]>([
     { timestamp: new Date().toLocaleTimeString([], { hour12: false }), message: { en: 'INITIALIZING SYSTEM MONITOR...', zh: '正在初始化系统监控...' }, type: 'INFO' },
-    { timestamp: new Date().toLocaleTimeString([], { hour12: false }), message: { en: 'ESTABLISHING SECURE UPLINK...', zh: '建立安全上行链路...' }, type: 'INFO' }
   ]);
   const [globalStatus, setGlobalStatus] = useState<Status>('OPERATIONAL');
   const [lang, setLang] = useState<Lang>('en');
-  const [config, setConfig] = useState<RemoteConfig | null>(null);
-  const [configError, setConfigError] = useState<string | null>(null);
-  const [isConfigLoading, setIsConfigLoading] = useState(true);
-  const [isFetching, setIsFetching] = useState(false);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [isConfigLoaded, setIsConfigLoaded] = useState(false);
+  
+  // Admin State
+  const [adminKey, setAdminKey] = useState<string | null>(null);
+  const isAdmin = !!adminKey;
+  const [showLogin, setShowLogin] = useState(false);
+  const [loginInput, setLoginInput] = useState('');
+  
+  // Editor State
+  const [showEditor, setShowEditor] = useState(false);
+  const [editorMode, setEditorMode] = useState<'CREATE' | 'EDIT'>('CREATE');
+  const [editId, setEditId] = useState<string | null>(null);
+  const [formData, setFormData] = useState({ name: '', region: '', status: 'OPERATIONAL' as Status });
 
   const t = DICTIONARY[lang];
 
-  const addLog = useCallback((message: { en: string; zh: string }, type: 'INFO' | 'WARN' | 'CRIT' = 'INFO') => {
-    setLogs(prev => [...prev.slice(-19), {
-      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
-      message,
-      type
-    }]);
+  // 1. Load Config
+  useEffect(() => {
+    fetch('/config.json')
+      .then(res => { if (res.ok) return res.json(); throw new Error("Config not found"); })
+      .then((cfg: AppConfig) => {
+        setConfig(cfg);
+        setIsConfigLoaded(true);
+        setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'REMOTE CONFIGURATION LOADED.', zh: '远程配置已加载。' }, type: 'INFO' }]);
+      })
+      .catch(() => {
+        setIsConfigLoaded(true);
+        setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'CONFIG NOT FOUND. ACTIVATING SIMULATION PROTOCOL.', zh: '未找到配置。正在激活模拟协议。' }, type: 'WARN' }]);
+      });
   }, []);
 
+  // 2. Data Loop
   useEffect(() => {
-    let isActive = true;
-    const loadConfig = async () => {
-      try {
-        const response = await fetch(`${import.meta.env.BASE_URL}config.json`, { cache: 'no-cache' });
-        if (!response.ok) throw new Error(`Unable to load config.json (HTTP ${response.status})`);
-        const data = await response.json();
-        if (!data.apiBaseUrl || !data.readKey) {
-          throw new Error('config.json must include "apiBaseUrl" and "readKey"');
+    if (!isConfigLoaded) return;
+
+    const fetchDataOrSimulate = async () => {
+      if (config) {
+        try {
+          // Use adminKey if available, otherwise readKey
+          const key = adminKey || config.readKey;
+          const res = await fetch(`${config.apiBase}/monitor`, {
+            headers: { 'Authorization': key }
+          });
+          if (!res.ok) throw new Error('API Error');
+          const data = await res.json();
+          const newServices: Service[] = data.map((item: any) => {
+             const appStatus = mapApiStatusToAppStatus(item.status);
+             return {
+               id: String(item.id),
+               name: item.name,
+               status: appStatus,
+               latency: appStatus === 'OPERATIONAL' ? Math.floor(Math.random() * 60) + 10 : 
+                        appStatus === 'DEGRADED' ? Math.floor(Math.random() * 200) + 100 : 0,
+               uptime: 99.9, 
+               region: item.type || 'UNKNOWN' // Map type to region
+             };
+          });
+          setServices(newServices);
+        } catch (err) {
+          setLogs(prev => {
+             if (prev.length > 0 && prev[prev.length-1].message.en.includes('CONNECTION ERROR')) return prev;
+             return [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'API CONNECTION ERROR: RETRYING...', zh: 'API 连接错误: 重试中...' }, type: 'CRIT' }];
+          });
         }
-        if (!isActive) return;
-        setConfig({
-          apiBaseUrl: String(data.apiBaseUrl).replace(/\/$/, ''),
-          readKey: String(data.readKey)
-        });
-        setConfigError(null);
-      } catch (err) {
-        if (!isActive) return;
-        setConfigError((err as Error).message);
-      } finally {
-        if (isActive) setIsConfigLoading(false);
+      } else {
+        // Simulation
+        setServices(prev => prev.map(svc => {
+          if (svc.status === 'OFFLINE') return svc;
+          const fluctuation = Math.floor(Math.random() * 20) - 10;
+          let newLatency = Math.max(0, svc.latency + fluctuation);
+          if (Math.random() > 0.95) newLatency += 100;
+          return { ...svc, latency: newLatency };
+        }));
+      }
+      // Ambient Log
+      if (Math.random() > 0.95) {
+        const evt = EVENT_TEMPLATES[Math.floor(Math.random() * EVENT_TEMPLATES.length)];
+        setLogs(prev => [...prev.slice(-19), { timestamp: new Date().toLocaleTimeString(), message: { en: evt.en, zh: evt.zh }, type: evt.type as 'INFO' | 'WARN' | 'CRIT' }]);
       }
     };
 
-    loadConfig();
-    return () => {
-      isActive = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!config) return;
-    let isActive = true;
-    const headers = { Authorization: config.readKey };
-
-    const requestData = async () => {
-      try {
-        setIsFetching(true);
-        const monitorResponse = await fetch(`${config.apiBaseUrl}/monitor`, { headers });
-        if (!monitorResponse.ok) {
-          throw new Error(`GET /monitor failed (${monitorResponse.status})`);
-        }
-        const monitorData: ApiMonitor[] = await monitorResponse.json();
-        if (!isActive) return;
-        if (Array.isArray(monitorData)) {
-          setServices(monitorData.map((monitor, index) => mapMonitorToService(monitor, index)));
-          addLog({
-            en: `Fetched ${monitorData.length} monitors from API`,
-            zh: `已从 API 获取 ${monitorData.length} 个监控项`
-          }, 'INFO');
-        } else {
-          throw new Error('Monitor payload must be an array');
-        }
-
-        const statusResponse = await fetch(`${config.apiBaseUrl}/status`, { headers });
-        if (statusResponse.ok) {
-          const statusPayload = await statusResponse.json();
-          if (statusPayload?.status) {
-            setGlobalStatus(normalizeStatus(statusPayload.status));
-          }
-        }
-      } catch (error) {
-        if (!isActive) return;
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        addLog({ en: `API request failed: ${message}`, zh: `API 请求失败: ${message}` }, 'WARN');
-      } finally {
-        if (isActive) setIsFetching(false);
-      }
-    };
-
-    requestData();
-    const interval = setInterval(requestData, 15000);
-    return () => {
-      isActive = false;
-      clearInterval(interval);
-    };
-  }, [config, addLog]);
-
-  useEffect(() => {
-    if (!config) return;
-    if (config.readKey === 'CHANGE_ME_READ_KEY') {
-      addLog({
-        en: 'config.json still uses the placeholder read key. Update it to connect to your backend.',
-        zh: 'config.json 仍在使用示例读密钥，请更新为实际后端凭证。'
-      }, 'WARN');
-    }
-  }, [config, addLog]);
+    const intervalTime = config ? 3000 : 1500;
+    const interval = setInterval(fetchDataOrSimulate, intervalTime);
+    fetchDataOrSimulate();
+    return () => clearInterval(interval);
+  }, [isConfigLoaded, config, adminKey]);
 
   useEffect(() => {
     const offline = services.some(s => s.status === 'OFFLINE');
@@ -650,137 +662,215 @@ const App = () => {
     else setGlobalStatus('OPERATIONAL');
   }, [services]);
 
+  // --- Actions ---
+
+  const handleLogin = () => {
+    if (loginInput.trim()) {
+      setAdminKey(loginInput);
+      setShowLogin(false);
+      setLoginInput('');
+      setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'ADMIN PRIVILEGES GRANTED', zh: '管理员权限已授予' }, type: 'INFO' }]);
+    }
+  };
+
+  const handleLogout = () => {
+    setAdminKey(null);
+    setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'ADMIN SESSION TERMINATED', zh: '管理员会话已终止' }, type: 'INFO' }]);
+  };
+
+  const openCreate = () => {
+    setEditorMode('CREATE');
+    setFormData({ name: '', region: '', status: 'OPERATIONAL' });
+    setShowEditor(true);
+  };
+
+  const openEdit = (svc: Service) => {
+    setEditorMode('EDIT');
+    setEditId(svc.id);
+    setFormData({ name: svc.name, region: svc.region, status: svc.status });
+    setShowEditor(true);
+  };
+
+  const handleSaveService = async () => {
+    const payload = {
+      name: formData.name,
+      type: formData.region, // Map region back to type for API
+      status: formData.status
+    };
+
+    if (config && adminKey) {
+      // API MODE
+      const url = editorMode === 'CREATE' ? `${config.apiBase}/monitor` : `${config.apiBase}/monitor/${editId}`;
+      const method = editorMode === 'CREATE' ? 'POST' : 'PUT';
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json', 'Authorization': adminKey },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error("Failed");
+        setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: `SERVICE ${editorMode === 'CREATE' ? 'DEPLOYED' : 'UPDATED'}`, zh: `服务已${editorMode === 'CREATE' ? '部署' : '更新'}` }, type: 'INFO' }]);
+      } catch(e) {
+        alert("Operation Failed");
+      }
+    } else {
+      // SIMULATION MODE
+      if (editorMode === 'CREATE') {
+        const newSvc: Service = {
+          id: Math.random().toString(36).substr(2, 9),
+          name: payload.name,
+          status: payload.status,
+          region: payload.type,
+          latency: 10, uptime: 100
+        };
+        setServices(prev => [...prev, newSvc]);
+      } else {
+        setServices(prev => prev.map(s => s.id === editId ? { ...s, name: payload.name, status: payload.status, region: payload.type } : s));
+      }
+    }
+    setShowEditor(false);
+  };
+
+  const handleDeleteService = async (id: string) => {
+    if (!confirm(t.delete + '?')) return;
+    
+    if (config && adminKey) {
+      // API
+      try {
+        await fetch(`${config.apiBase}/monitor/${id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': adminKey }
+        });
+        setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: { en: 'SERVICE DECOMMISSIONED', zh: '服务已退役' }, type: 'WARN' }]);
+      } catch(e) { alert("Delete failed"); }
+    } else {
+      // Sim
+      setServices(prev => prev.filter(s => s.id !== id));
+    }
+  };
+
   return (
     <>
       <StarryQuicksand />
-      
-      <div style={{ 
-        maxWidth: '1400px', 
-        margin: '0 auto', 
-        padding: '3rem', 
-        position: 'relative', 
-        zIndex: 1,
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column'
-      }}>
+      <style>{`
+        .app-container { max-width: 1400px; margin: 0 auto; padding: 3rem; position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; }
+        .app-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 2rem; }
+        .header-controls { display: flex; gap: 2rem; align-items: center; }
+        .service-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 2rem; flex: 1; }
+        .glitch-title { font-size: 3.5rem; }
+        .glitch-subtitle { font-size: 1rem; }
+        .status-value { font-size: 2.5rem; }
+        @media (max-width: 768px) {
+          .app-container { padding: 1rem; }
+          .app-header { flex-direction: column; align-items: flex-start; gap: 1.5rem; margin-bottom: 2rem; }
+          .header-controls { width: 100%; justify-content: space-between; gap: 1rem; }
+          .glitch-title { font-size: 2.2rem !important; }
+          .glitch-subtitle { font-size: 0.85rem !important; }
+          .service-grid { grid-template-columns: 1fr; gap: 1.5rem; }
+          .status-value { font-size: 2rem !important; }
+        }
+      `}</style>
+
+      <div className="app-container">
         
         {/* HEADER */}
-        <header style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          marginBottom: '4rem',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
-          paddingBottom: '2rem'
-        }}>
+        <header className="app-header">
           <div style={{ display: 'flex', alignItems: 'flex-start', flexDirection: 'column' }}>
             <GlitchText text={t.title} subtext={t.subtitle} />
           </div>
 
-          <div style={{ display: 'flex', gap: '2rem', alignItems: 'center' }}>
-            {/* Language Switcher - Sharp Design */}
-            <button
+          <div className="header-controls">
+            <SciFiButton onClick={isAdmin ? handleLogout : () => setShowLogin(true)} variant={isAdmin ? 'red' : 'cyan'}>
+              {isAdmin ? `[ ${t.logout} ]` : `[ ${t.admin} ]`}
+            </SciFiButton>
+
+            <button 
               onClick={() => setLang(l => l === 'en' ? 'zh' : 'en')}
               style={{
-                background: 'transparent',
-                border: `1px solid ${HexColor.cyan}`,
-                color: HexColor.cyan,
-                padding: '0.5rem 1rem',
-                fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-                fontSize: '1rem',
-                cursor: 'pointer',
+                background: 'transparent', border: `1px solid ${HexColor.cyan}`, color: HexColor.cyan,
+                padding: '0.5rem 1rem', fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
+                fontSize: '1rem', cursor: 'pointer',
                 clipPath: 'polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px)',
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-                position: 'relative',
-                overflow: 'hidden',
-                transition: 'all 0.2s'
-              }}
-              onMouseEnter={(e) => {
-                 e.currentTarget.style.background = 'rgba(0, 243, 255, 0.1)';
-                 e.currentTarget.style.boxShadow = `0 0 15px ${HexColor.cyan}40`;
-              }}
-              onMouseLeave={(e) => {
-                 e.currentTarget.style.background = 'transparent';
-                 e.currentTarget.style.boxShadow = 'none';
+                textTransform: 'uppercase'
               }}
             >
               [ {lang === 'en' ? 'EN' : '中文'} ]
             </button>
 
-            {config && (
-              <span style={{
-                fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-                fontSize: '0.8rem',
-                color: isFetching ? HexColor.yellow : HexColor.cyan,
-                border: `1px solid ${isFetching ? HexColor.yellow : HexColor.cyan}`,
-                padding: '0.25rem 0.75rem',
-                letterSpacing: '2px',
-                textTransform: 'uppercase'
-              }}>
-                {isFetching ? 'SYNCING API' : 'API LINKED'}
-              </span>
-            )}
-
             <GlobalStatusIndicator status={globalStatus} lang={lang} />
           </div>
         </header>
 
-        {isConfigLoading && (
-          <div style={{
-            border: `1px solid ${HexColor.yellow}`,
-            color: HexColor.yellow,
-            padding: '0.75rem 1rem',
-            fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-            marginBottom: '1.5rem'
-          }}>
-            Loading config.json ... / 正在加载 config.json ...
-          </div>
-        )}
-
-        {configError && (
-          <div style={{
-            border: `1px solid ${HexColor.red}`,
-            color: HexColor.red,
-            padding: '0.75rem 1rem',
-            fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-            marginBottom: '1.5rem'
-          }}>
-            Config error: {configError}. Ensure public/config.json is present with your API base URL and readKey.
-          </div>
-        )}
-
         {/* GRID */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))',
-          gap: '2rem',
-          flex: 1
-        }}>
+        <div className="service-grid">
           {services.map(svc => (
-            <Card key={svc.id} service={svc} lang={lang} />
+            <Card 
+              key={svc.id} 
+              service={svc} 
+              lang={lang} 
+              isAdmin={isAdmin}
+              onEdit={openEdit}
+              onDelete={handleDeleteService}
+            />
           ))}
+          {isAdmin && <AddServiceCard onClick={openCreate} lang={lang} />}
         </div>
 
-        {/* FOOTER / LOGS */}
+        {/* FOOTER */}
         <Terminal logs={logs} lang={lang} />
         
-        <footer style={{ 
-          marginTop: '2rem', 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          opacity: 0.6, 
-          fontSize: '0.7rem', 
-          fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace',
-          borderTop: '1px solid rgba(255,255,255,0.1)',
-          paddingTop: '1rem'
-        }}>
+        <footer style={{ marginTop: '2rem', display: 'flex', justifyContent: 'space-between', opacity: 0.6, fontSize: '0.7rem', fontFamily: '"Share Tech Mono", "Noto Sans SC", monospace', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '1rem' }}>
           <div>{t.secure}: TLS v1.3 // {t.node}: ALPHA-7</div>
-          <div>{t.coords}: 34.0522, -118.2437 // {t.time}: {new Date().toISOString()}</div>
+          <div>{t.coords}: 34.0522° N, 118.2437° W</div>
         </footer>
-
       </div>
+
+      {/* LOGIN MODAL */}
+      <Modal isOpen={showLogin} onClose={() => setShowLogin(false)} title={t.admin}>
+        <SciFiInput 
+          label={t.keyPlaceholder} 
+          value={loginInput} 
+          onChange={(e: any) => setLoginInput(e.target.value)} 
+          placeholder="****-****-****"
+        />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
+          <SciFiButton onClick={() => setShowLogin(false)} variant="red">{t.cancel}</SciFiButton>
+          <SciFiButton onClick={handleLogin}>{t.login}</SciFiButton>
+        </div>
+      </Modal>
+
+      {/* EDITOR MODAL */}
+      <Modal isOpen={showEditor} onClose={() => setShowEditor(false)} title={editorMode === 'CREATE' ? t.deploy : t.edit}>
+        <SciFiInput 
+          label={t.name} 
+          value={formData.name} 
+          onChange={(e: any) => setFormData({...formData, name: e.target.value})} 
+          placeholder="e.g. CORE_GATEWAY"
+        />
+        <SciFiInput 
+          label={t.type} 
+          value={formData.region} 
+          onChange={(e: any) => setFormData({...formData, region: e.target.value})} 
+          placeholder="e.g. API"
+        />
+        <div style={{ marginBottom: '2rem' }}>
+          <label style={{ display: 'block', color: '#888', fontSize: '0.8rem', marginBottom: '0.5rem' }}>// {t.statusLabel}</label>
+          <select 
+            value={formData.status}
+            onChange={(e) => setFormData({...formData, status: e.target.value as Status})}
+            style={{ width: '100%', background: '#000', color: '#fff', border: `1px solid ${HexColor.cyan}`, padding: '0.5rem', fontFamily: 'inherit' }}
+          >
+            <option value="OPERATIONAL">OPERATIONAL</option>
+            <option value="DEGRADED">DEGRADED</option>
+            <option value="OFFLINE">OFFLINE</option>
+            <option value="MAINTENANCE">MAINTENANCE</option>
+          </select>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
+          <SciFiButton onClick={() => setShowEditor(false)} variant="red">{t.cancel}</SciFiButton>
+          <SciFiButton onClick={handleSaveService}>{t.save}</SciFiButton>
+        </div>
+      </Modal>
     </>
   );
 };
